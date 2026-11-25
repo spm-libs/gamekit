@@ -1,0 +1,135 @@
+export trait Ingredient {
+    item: number
+    count: number
+}
+
+export trait Recipe {
+    id: string
+    inputs: Ingredient[]
+    tools?: Ingredient[]
+    outputs: Ingredient[]
+    discover?: () => bool
+}
+
+export trait CraftingStock {
+    countItem: (item: number) => number
+    take: (item: number, count: number) => bool
+    give: (item: number, count: number) => bool
+    snapshot: () => any
+    restore: (snapshot: any) => void
+}
+
+export type CraftResult = "crafted" | "missing" | "full"
+
+export trait Crafting {
+    refresh: () => void
+    visible: () => Recipe[]
+    canCraft: (recipe: Recipe) => bool
+    missing: (recipe: Recipe) => Ingredient[]
+    maxCraftable: (recipe: Recipe) => number
+    craft: (recipe: Recipe) => CraftResult
+    discovered: () => string[]
+    discoverAll: () => void
+}
+
+export func createCrafting(recipes: Recipe[], stock: CraftingStock) -> Crafting {
+    const discovered = new Set<string>()
+    let everything = false
+    let known: Recipe[] = []
+    let knownIds: string[] = []
+
+    func same() -> bool {
+        if (recipes.length != known.length) return false
+        for (let i = 0; i < recipes.length; i++) if (recipes[i] !== known[i] || recipes[i].id != knownIds[i]) return false
+        return true
+    }
+
+    func remember() -> void {
+        known = recipes.slice()
+        knownIds = recipes.map((recipe) => recipe.id)
+    }
+
+    func refresh() -> void {
+        if (everything && same()) return
+        let all = true
+        for (const recipe of recipes) {
+            if (discovered.has(recipe.id)) continue
+            if (!recipe.discover || recipe.discover()) discovered.add(recipe.id)
+            else all = false
+        }
+        everything = all
+        remember()
+    }
+
+    func total(parts: Ingredient[]) -> Map<number, number> {
+        const totals = new Map<number, number>()
+        for (const part of parts) totals.set(part.item, (totals.get(part.item) ?? 0) + part.count)
+        return totals
+    }
+
+    func needed(recipe: Recipe) -> Map<number, number> {
+        return total([...recipe.inputs, ...(recipe.tools ?? [])])
+    }
+
+    func canCraft(recipe: Recipe) -> bool {
+        for (const [item, count] of needed(recipe)) if (stock.countItem(item) < count) return false
+        return true
+    }
+
+    func missing(recipe: Recipe) -> Ingredient[] {
+        const out: Ingredient[] = []
+        for (const [item, count] of needed(recipe)) {
+            const short = count - stock.countItem(item)
+            if (short > 0) out.push({ item, count: short })
+        }
+        return out
+    }
+
+    func maxCraftable(recipe: Recipe) -> number {
+        const spent = total(recipe.inputs)
+        let most = Infinity
+        for (const [item, count] of needed(recipe)) {
+            const have = stock.countItem(item)
+            if (have < count) return 0
+            const each = spent.get(item) ?? 0
+            if (each > 0) most = Math.min(most, Math.floor((have - (count - each)) / each))
+        }
+        return most
+    }
+
+    func craft(recipe: Recipe) -> CraftResult {
+        if (!canCraft(recipe)) return "missing"
+        const saved = stock.snapshot()
+        for (const input of recipe.inputs) {
+            if (!stock.take(input.item, input.count)) {
+                stock.restore(saved)
+                return "missing"
+            }
+        }
+        for (const output of recipe.outputs) {
+            if (!stock.give(output.item, output.count)) {
+                stock.restore(saved)
+                return "full"
+            }
+        }
+        return "crafted"
+    }
+
+    return {
+        refresh,
+        visible: () => {
+            refresh()
+            return recipes.filter((recipe) => discovered.has(recipe.id))
+        },
+        canCraft,
+        missing,
+        maxCraftable,
+        craft,
+        discovered: () => Array.from(discovered),
+        discoverAll: () => {
+            for (const recipe of recipes) discovered.add(recipe.id)
+            everything = true
+            remember()
+        },
+    }
+}

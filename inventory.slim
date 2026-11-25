@@ -1,0 +1,173 @@
+export trait SlotStore {
+    ids: () => number[]
+    assign: (slot: number, item: number) => void
+}
+
+export trait ItemRules {
+    maxStack: (item: number) => number
+    maxDurability: (item: number) => number
+    hasDurability: (item: number) => bool
+}
+
+export trait SlotStack {
+    item: number
+    count: number
+}
+
+export trait InventorySnapshot {
+    slots: number[]
+    counts: number[]
+    dur: number[]
+}
+
+export trait SlotInventory {
+    slots: () => number[]
+    invalidate: () => void
+    count: (slot: number) => number
+    durability: (slot: number) => number
+    set: (slot: number, item: number, count: number, durability?: number) => void
+    countItem: (item: number) => number
+    giveCount: (item: number, count: number) => number
+    give: (item: number, count?: number) => bool
+    take: (item: number, count?: number) => bool
+    takeOne: (slot: number) => number
+    takeStack: (slot: number) => SlotStack
+    snapshot: () => InventorySnapshot
+    restore: (snapshot: InventorySnapshot) => void
+    wear: (slot: number, amount?: number) => bool
+}
+
+export func createInventory(store: SlotStore, rules: ItemRules) -> SlotInventory {
+    const counts: number[] = []
+    const durability: number[] = []
+    let cache: number[] | null = null
+
+    func slots() -> number[] {
+        return cache ?? (cache = store.ids())
+    }
+
+    func count(slot: number) -> number {
+        if (slots()[slot] == 0) return 0
+        const value = counts[slot] || 0
+        return value > 0 ? value : 1
+    }
+
+    func wornDurability(slot: number) -> number {
+        const item = slots()[slot]
+        if (!rules.hasDurability(item)) return 0
+        const value = durability[slot]
+        return value > 0 ? value : rules.maxDurability(item)
+    }
+
+    func set(slot: number, item: number, amount: number, worn?: number) -> void {
+        store.assign(slot, item)
+        cache = null
+        counts[slot] = item == 0 ? 0 : amount
+        durability[slot] = item == 0 ? 0 : (worn != undefined ? worn : rules.maxDurability(item))
+    }
+
+    func countItem(item: number) -> number {
+        if (item == 0) return 0
+        const ids = slots()
+        let total = 0
+        for (let slot = 0; slot < ids.length; slot++) if (ids[slot] == item) total += count(slot)
+        return total
+    }
+
+    func giveCount(item: number, amount: number) -> number {
+        if (item == 0 || amount <= 0) return 0
+        const ids = slots()
+        const max = rules.maxStack(item)
+        if (!(max > 0)) return amount
+        let left = amount
+        for (let slot = 0; slot < ids.length && left > 0; slot++) {
+            if (ids[slot] != item) continue
+            const current = count(slot)
+            const added = Math.min(left, max - current)
+            if (added > 0) {
+                set(slot, item, current + added, wornDurability(slot))
+                left -= added
+            }
+        }
+        for (let slot = 0; slot < ids.length && left > 0; slot++) {
+            if (ids[slot] != 0) continue
+            const added = Math.min(left, max)
+            set(slot, item, added)
+            left -= added
+        }
+        return left
+    }
+
+    func take(item: number, amount = 1) -> bool {
+        if (item == 0 || amount <= 0) return true
+        if (countItem(item) < amount) return false
+        const ids = slots()
+        let left = amount
+        for (let slot = ids.length - 1; slot >= 0 && left > 0; slot--) {
+            if (ids[slot] != item) continue
+            const current = count(slot)
+            const removed = Math.min(left, current)
+            if (current - removed > 0) set(slot, item, current - removed, wornDurability(slot))
+            else set(slot, 0, 0)
+            left -= removed
+        }
+        return true
+    }
+
+    func takeOne(slot: number) -> number {
+        const item = slots()[slot]
+        if (item == 0) return 0
+        const current = count(slot)
+        if (current > 1) set(slot, item, current - 1, wornDurability(slot))
+        else set(slot, 0, 0)
+        return item
+    }
+
+    func takeStack(slot: number) -> SlotStack {
+        const item = slots()[slot]
+        if (item == 0) return { item: 0, count: 0 }
+        const amount = count(slot)
+        set(slot, 0, 0)
+        return { item, count: amount }
+    }
+
+    func snapshot() -> InventorySnapshot {
+        const ids = slots()
+        return { slots: ids.slice(), counts: ids.map((_, slot) => count(slot)), dur: ids.map((_, slot) => wornDurability(slot)) }
+    }
+
+    func restore(saved: InventorySnapshot) -> void {
+        for (let slot = 0; slot < saved.slots.length; slot++) set(slot, saved.slots[slot], saved.counts[slot], saved.dur[slot])
+    }
+
+    func wear(slot: number, amount = 1) -> bool {
+        const item = slots()[slot]
+        if (!rules.hasDurability(item)) return false
+        const left = Math.min(rules.maxDurability(item), wornDurability(slot) - amount)
+        if (left <= 0) {
+            const current = count(slot)
+            if (current > 1) set(slot, item, current - 1)
+            else set(slot, 0, 0)
+            return true
+        }
+        durability[slot] = left
+        return false
+    }
+
+    return {
+        slots,
+        invalidate: () => { cache = null },
+        count,
+        durability: wornDurability,
+        set,
+        countItem,
+        giveCount,
+        give: (item: number, amount = 1) => giveCount(item, amount) == 0,
+        take,
+        takeOne,
+        takeStack,
+        snapshot,
+        restore,
+        wear,
+    }
+}

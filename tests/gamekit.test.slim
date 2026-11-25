@@ -1,0 +1,415 @@
+use { distance2, distance3, damp, moveTowards } from "../math"
+use { formatVector } from "../format"
+use { GameHost } from "../host"
+use { createKeeper, remember } from "../keep"
+use { createCommands } from "../commands"
+use { Step, StepRun, scenarioContext, advanceSteps } from "../scenario"
+use { createInventory } from "../inventory"
+use { createCrafting, Recipe } from "../crafting"
+use { createEffectClock } from "../effects"
+use { createInterval } from "../timers"
+
+func fakeHost(store: Record<string, any>, logs: string[]) -> GameHost {
+    return {
+        onFrame: (handler: (dt: number) => void) => { handler(0) },
+        log: (message: string) => { logs.push(message) },
+        persistent: (name: string) => store[name] || (store[name] = {}),
+    }
+}
+
+test("math and format", () => {
+    assertEqual(distance2(0, 0, 3, 4), 5)
+    assertEqual(distance3(0, 0, 0, 3, 4, 0), 5)
+    assertEqual(formatVector([1.23456, 2]), "[1.235, 2]")
+})
+
+test("a keeper hands state back after a reload", () => {
+    const store: Record<string, any> = {}
+    const logs: string[] = []
+    const before = createKeeper(fakeHost(store, logs))
+    before.keep("count", () => 3, (value) => { throw new Error(`nothing to load yet: ${value}`) })
+    before.stash()
+    let loaded: any = null
+    const after = createKeeper(fakeHost(store, logs))
+    after.keep("count", () => 0, (value) => { loaded = value })
+    assertEqual(loaded, 3)
+    after.keep("broken", () => { throw new Error("boom") }, () => {})
+    after.collect()
+    assert(logs.some((line) => line.includes("broken")))
+    after.forget()
+    assertDeepEqual(Object.keys(store.kept), [])
+})
+
+test("remember hands back the same value after a reload, and keeps it out of saves", () => {
+    const store: Record<string, any> = {}
+    const logs: string[] = []
+    const first = remember(fakeHost(store, logs), "chat", () => ({ log: [] as string[], next: 1 }))
+    first.log.push("hi")
+    first.next++
+    const again = remember(fakeHost(store, logs), "chat", () => ({ log: [] as string[], next: 1 }))
+    assertEqual(again, first)
+    assertEqual(again.next, 2)
+    assertDeepEqual(again.log, ["hi"])
+    assertDeepEqual(createKeeper(fakeHost(store, logs)).collect(), {})
+})
+
+test("commands run by any of their names", () => {
+    const commands = createCommands()
+    const seen: string[][] = []
+    commands.add("give|g", "/give", (args) => { seen.push(args) })
+    assert(commands.run("G stone 2"))
+    assert(!commands.run("nope"))
+    assertDeepEqual(seen, [["stone", "2"]])
+    assertDeepEqual(commands.names(), ["g", "give"])
+})
+
+test("scenario steps wait, check and time out", () => {
+    const run: StepRun = { step: 0, elapsed: 0, failures: [], data: {} }
+    const steps: Step[] = []
+    let flag = false
+    let reloads = 0
+    const t = scenarioContext(run, steps, 1)
+    t.step(() => { flag = true })
+    t.wait(0.5)
+    t.until(() => flag, "flag")
+    t.reload()
+    t.until(() => false, "never")
+    t.equal(1, 2, "numbers")
+    const reload = () => { reloads++ }
+    let state = "running"
+    for (let frame = 0; frame < 20 && state == "running"; frame++) state = advanceSteps(steps, run, 0.3, reload, 1)
+    assertEqual(reloads, 1)
+    assertEqual(state, "timeout")
+    assertDeepEqual(run.failures, ["numbers: got 1, expected 2", "timed out: never"])
+})
+
+func makeInventory(size: number) {
+    const ids: number[] = new Array(size).fill(0)
+    return createInventory(
+        { ids: () => ids.slice(), assign: (slot: number, item: number) => { ids[slot] = item } },
+        { maxStack: (item: number) => item == 9 ? 1 : 10, maxDurability: (item: number) => item == 9 ? 3 : 0, hasDurability: (item: number) => item == 9 },
+    )
+}
+
+test("an inventory stacks, takes and wears tools", () => {
+    const inventory = makeInventory(3)
+    assertEqual(inventory.giveCount(1, 25), 0)
+    assertEqual(inventory.countItem(1), 25)
+    assertEqual(inventory.giveCount(2, 10), 10)
+    assert(inventory.take(1, 12))
+    assertEqual(inventory.countItem(1), 13)
+    assertDeepEqual(inventory.takeStack(0), { item: 1, count: 10 })
+    assertEqual(inventory.takeOne(1), 1)
+    assertEqual(inventory.countItem(1), 2)
+    const tools = makeInventory(1)
+    assert(tools.give(9))
+    assert(!tools.wear(0))
+    assert(!tools.wear(0))
+    assert(tools.wear(0))
+    assertEqual(tools.countItem(9), 0)
+})
+
+test("crafting spends inputs, keeps tools and rolls back when full", () => {
+    const inventory = makeInventory(2)
+    inventory.give(1, 4)
+    inventory.give(5, 1)
+    const axe: Recipe = { id: "axe", inputs: [{ item: 1, count: 2 }], tools: [{ item: 5, count: 1 }], outputs: [{ item: 9, count: 1 }], discover: () => inventory.countItem(1) > 0 }
+    const crafting = createCrafting([axe], inventory)
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["axe"])
+    assertEqual(crafting.craft(axe), "full")
+    assertEqual(inventory.countItem(1), 4)
+    inventory.take(5, 1)
+    assertEqual(crafting.craft(axe), "missing")
+})
+
+test("an effect clock counts up and down in whole seconds", () => {
+    const clock = createEffectClock()
+    const effects = [{ key: "fly", mode: "up", secs: 0 }, { key: "bleed", mode: "left", secs: 2.2 }]
+    assert(clock.tick(0.1, effects))
+    assert(!clock.tick(0, effects))
+    assert(clock.tick(1, effects))
+    assertEqual(clock.seconds(effects[0]), 1)
+    assertEqual(clock.seconds(effects[1]), 3)
+})
+
+test("commands ignore names an object already has", () => {
+    const commands = createCommands()
+    commands.add("give", "/give", (args) => {})
+    assert(!commands.run("constructor"))
+    assert(!commands.run("__proto__"))
+    assert(!commands.run("toString x"))
+    assert(!commands.run(""))
+    assert(commands.run("give"))
+})
+
+test("crafting counts an item once for all its uses and takes all or nothing", () => {
+    const inventory = makeInventory(3)
+    inventory.give(1, 3)
+    const twice: Recipe = { id: "twice", inputs: [{ item: 1, count: 2 }, { item: 1, count: 2 }], outputs: [{ item: 2, count: 1 }] }
+    const withTool: Recipe = { id: "tool", inputs: [{ item: 1, count: 2 }], tools: [{ item: 1, count: 2 }], outputs: [{ item: 2, count: 1 }] }
+    const crafting = createCrafting([twice, withTool], inventory)
+    assert(!crafting.canCraft(twice))
+    assert(!crafting.canCraft(withTool))
+    assertEqual(crafting.craft(twice), "missing")
+    assertEqual(inventory.countItem(1), 3)
+    inventory.give(1, 1)
+    assert(crafting.canCraft(withTool))
+    assertEqual(crafting.craft(withTool), "crafted")
+    assertEqual(inventory.countItem(1), 2)
+    assertEqual(inventory.countItem(2), 1)
+
+    let stone = 5
+    let given = 0
+    const flaky = createCrafting([], {
+        countItem: (item: number) => stone,
+        take: (item: number, count: number) => {
+            if (item == 7) return false
+            stone -= count
+            return true
+        },
+        give: (item: number, count: number) => { given += count; return true },
+        snapshot: () => stone,
+        restore: (saved: any) => { stone = saved },
+    })
+    const mixed: Recipe = { id: "mixed", inputs: [{ item: 1, count: 2 }, { item: 7, count: 1 }], outputs: [{ item: 2, count: 1 }] }
+    assertEqual(flaky.craft(mixed), "missing")
+    assertEqual(stone, 5)
+    assertEqual(given, 0)
+})
+
+test("crafting sees recipes added after everything was discovered", () => {
+    const inventory = makeInventory(1)
+    const recipes: Recipe[] = [{ id: "a", inputs: [], outputs: [] }]
+    const crafting = createCrafting(recipes, inventory)
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["a"])
+    recipes.push({ id: "b", inputs: [], outputs: [] })
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["a", "b"])
+    let ready = false
+    recipes.push({ id: "c", inputs: [], outputs: [], discover: () => ready })
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["a", "b"])
+    ready = true
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["a", "b", "c"])
+    crafting.discoverAll()
+    recipes.push({ id: "d", inputs: [], outputs: [] })
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["a", "b", "c", "d"])
+})
+
+test("an inventory takes all or nothing", () => {
+    const inventory = makeInventory(3)
+    inventory.give(1, 7)
+    assert(!inventory.take(1, 100))
+    assertEqual(inventory.countItem(1), 7)
+    assert(inventory.take(1, 7))
+    assertEqual(inventory.countItem(1), 0)
+    assert(!inventory.take(1))
+})
+
+func durableInventory(size: number, stack: number) {
+    const ids: number[] = new Array(size).fill(0)
+    return createInventory(
+        { ids: () => ids.slice(), assign: (slot: number, item: number) => { ids[slot] = item } },
+        { maxStack: (item: number) => item == 3 ? 0 : stack, maxDurability: (item: number) => 10, hasDurability: (item: number) => item == 9 },
+    )
+}
+
+test("an inventory keeps durability and breaks one item of a stack", () => {
+    const inventory = durableInventory(2, 5)
+    inventory.give(9, 3)
+    assert(!inventory.wear(0, 4))
+    assertEqual(inventory.durability(0), 6)
+    inventory.give(9, 1)
+    assertEqual(inventory.durability(0), 6)
+    assert(inventory.take(9, 1))
+    assertEqual(inventory.durability(0), 6)
+    assertEqual(inventory.takeOne(0), 9)
+    assertEqual(inventory.durability(0), 6)
+    assertEqual(inventory.count(0), 2)
+    assert(inventory.wear(0, 6))
+    assertEqual(inventory.count(0), 1)
+    assertEqual(inventory.durability(0), 10)
+    assert(inventory.wear(0, 10))
+    assertEqual(inventory.countItem(9), 0)
+})
+
+test("an item that can't stack is not placed", () => {
+    const inventory = durableInventory(2, 5)
+    assertEqual(inventory.giveCount(3, 4), 4)
+    assert(!inventory.give(3))
+    assertEqual(inventory.countItem(3), 0)
+    assertDeepEqual(inventory.slots(), [0, 0])
+})
+
+test("an effect clock counts up from zero and tells keys apart", () => {
+    const clock = createEffectClock()
+    const up = { key: "fly", mode: "up", secs: 0 }
+    clock.tick(0.1, [up])
+    clock.tick(0.1, [up])
+    assertEqual(clock.seconds(up), 0)
+    clock.tick(0.9, [up])
+    assertEqual(clock.seconds(up), 1)
+    const other = createEffectClock()
+    assert(other.tick(0, [{ key: "a", mode: "left", secs: 11 }]))
+    assert(other.tick(0, [{ key: "a1", mode: "left", secs: 1 }]))
+})
+
+test("a keeper keeps odd values and only its own keys", () => {
+    const store: Record<string, any> = {}
+    const logs: string[] = []
+    const before = createKeeper(fakeHost(store, logs))
+    before.keep("gone", () => undefined, (value) => {})
+    before.keep("far", () => ({ a: Infinity, b: -Infinity, c: NaN, d: [Infinity] }), (value) => {})
+    before.stash()
+    assertDeepEqual(logs, [])
+    assert(!Object.keys(store.kept).includes("gone"))
+    let loaded: any = null
+    let proto = false
+    const after = createKeeper(fakeHost(store, logs))
+    after.keep("constructor", () => 1, (value) => { proto = true })
+    after.keep("toString", () => 1, (value) => { proto = true })
+    after.keep("far", () => 0, (value) => { loaded = value })
+    assert(!proto)
+    assertEqual(loaded.a, Infinity)
+    assertEqual(loaded.b, -Infinity)
+    assert(Number.isNaN(loaded.c))
+    assertEqual(loaded.d[0], Infinity)
+    after.keep("later", () => 2, (value) => {})
+    after.stash()
+    assertEqual(store.kept.later, 2)
+    after.keep("later", () => undefined, (value) => {})
+    after.stash()
+    assert(!Object.keys(store.kept).includes("later"))
+})
+
+test("a keeper's collect is plain JSON and a save file loads back", () => {
+    const store: Record<string, any> = {}
+    const logs: string[] = []
+    const marked = { "$kept": "number", value: "Infinity" }
+    const lookalike = { "$kept": "object", value: { a: 1 }, other: true }
+    const before = createKeeper(fakeHost(store, logs))
+    before.keep("far", () => ({ inf: Infinity, nan: NaN, list: [-Infinity, 1] }), (value) => {})
+    before.keep("marked", () => ({ marked, lookalike, plain: { "$kept": "hello" } }), (value) => {})
+    const text = JSON.stringify(before.collect())
+    assert(!text.includes("null"))
+    const saved: Record<string, any> = { kept: JSON.parse(text) }
+    let far: any = null
+    let back: any = null
+    const after = createKeeper(fakeHost(saved, logs))
+    after.keep("far", () => 0, (value) => { far = value })
+    after.keep("marked", () => 0, (value) => { back = value })
+    assertEqual(far.inf, Infinity)
+    assert(Number.isNaN(far.nan))
+    assertDeepEqual(far.list.slice(1), [1])
+    assertEqual(far.list[0], -Infinity)
+    assertDeepEqual(back, { marked, lookalike, plain: { "$kept": "hello" } })
+    const old: Record<string, any> = { kept: { score: 12, list: [1, null], "$kept": 3 } }
+    let score: any = null
+    let list: any = null
+    const fromOld = createKeeper(fakeHost(old, logs))
+    fromOld.keep("score", () => 0, (value) => { score = value })
+    fromOld.keep("list", () => 0, (value) => { list = value })
+    assertEqual(score, 12)
+    assertDeepEqual(list, [1, null])
+    assertDeepEqual(logs, [])
+})
+
+test("wear with a negative amount repairs up to the full durability", () => {
+    const inventory = durableInventory(1, 1)
+    inventory.give(9, 1)
+    assert(!inventory.wear(0, 7))
+    assert(!inventory.wear(0, -3))
+    assertEqual(inventory.durability(0), 6)
+    assert(!inventory.wear(0, -100))
+    assertEqual(inventory.durability(0), 10)
+})
+
+test("crafting looks again when a recipe is replaced", () => {
+    const inventory = makeInventory(1)
+    const recipes: Recipe[] = [{ id: "a", inputs: [], outputs: [] }, { id: "b", inputs: [], outputs: [] }]
+    const crafting = createCrafting(recipes, inventory)
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["a", "b"])
+    recipes[1] = { id: "c", inputs: [], outputs: [] }
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["a", "c"])
+    recipes[0].id = "d"
+    assertDeepEqual(crafting.visible().map((recipe) => recipe.id), ["d", "c"])
+})
+
+test("command names are matched in any case, and quotes keep words together", () => {
+    const commands = createCommands()
+    const seen: string[][] = []
+    commands.add("Give| G ", "/give", (args) => { seen.push(args) })
+    assert(commands.run("give a"))
+    assert(commands.run("GIVE b"))
+    assert(commands.run("g \"oak log\" 2 'a b'"))
+    assertDeepEqual(seen, [["a"], ["b"], ["oak log", "2", "a b"]])
+    assertDeepEqual(commands.names(), ["g", "give"])
+})
+
+test("a command added again replaces its usage instead of repeating it", () => {
+    const commands = createCommands()
+    commands.add("give|g", "/give old", (args) => {})
+    commands.add("help", "/help", (args) => {})
+    commands.add("give|g", "/give new", (args) => {})
+    assertDeepEqual(commands.usages(), ["/give new", "/help"])
+})
+
+test("an effect clock keeps counting up after a reload", () => {
+    const before = createEffectClock()
+    const fly = { key: "fly", mode: "up", secs: 0 }
+    before.tick(0, [fly])
+    before.tick(4.5, [fly])
+    assertEqual(before.seconds(fly), 4)
+    const saved = JSON.parse(JSON.stringify(before.snapshot()))
+    const after = createEffectClock()
+    after.restore(saved)
+    assert(after.tick(0.6, [fly]))
+    assertEqual(after.seconds(fly), 5)
+    assert(!after.tick(0.1, [fly]))
+    assert(after.tick(0, []))
+    assert(!after.tick(0, []))
+})
+
+test("crafting tells what is missing and how many can be made", () => {
+    const inventory = makeInventory(3)
+    inventory.give(1, 7)
+    inventory.give(5, 1)
+    const plank: Recipe = { id: "plank", inputs: [{ item: 1, count: 2 }], tools: [{ item: 5, count: 1 }], outputs: [{ item: 2, count: 1 }] }
+    const both: Recipe = { id: "both", inputs: [{ item: 1, count: 2 }], tools: [{ item: 1, count: 1 }, { item: 6, count: 1 }], outputs: [] }
+    const free: Recipe = { id: "free", inputs: [], tools: [{ item: 5, count: 1 }], outputs: [] }
+    const crafting = createCrafting([plank, both, free], inventory)
+    assertEqual(crafting.maxCraftable(plank), 3)
+    assertDeepEqual(crafting.missing(plank), [])
+    assertDeepEqual(crafting.missing(both), [{ item: 6, count: 1 }])
+    assertEqual(crafting.maxCraftable(both), 0)
+    inventory.give(6, 1)
+    assertEqual(crafting.maxCraftable(both), 3)
+    assertEqual(crafting.maxCraftable(free), Infinity)
+    inventory.take(5, 1)
+    assertDeepEqual(crafting.missing(plank), [{ item: 5, count: 1 }])
+    assertEqual(crafting.maxCraftable(free), 0)
+})
+
+test("an interval fires once per period, at once when asked", () => {
+    const poll = createInterval(1)
+    assert(!poll.tick(0.6))
+    assert(poll.tick(0.6))
+    assert(!poll.tick(0.5))
+    poll.fire()
+    assert(poll.tick(0))
+    assert(!poll.tick(0.9))
+    poll.reset()
+    assert(!poll.tick(0.9))
+    assert(createInterval(5, true).tick(0))
+})
+
+test("damp moves the same way whatever the frame rate", () => {
+    let slow = 0
+    let fast = 0
+    for (let i = 0; i < 10; i++) slow = damp(slow, 1, 2, 0.1)
+    for (let i = 0; i < 100; i++) fast = damp(fast, 1, 2, 0.01)
+    assert(Math.abs(slow - fast) < 1e-9)
+    assert(Math.abs(slow - (1 - Math.exp(-0.5))) < 1e-9)
+    assertEqual(damp(3, 7, 0, 0.1), 7)
+    assertEqual(moveTowards(0, 1, 0.3), 0.3)
+    assertEqual(moveTowards(1, 0, 0.3), 0.7)
+    assertEqual(moveTowards(0.9, 1, 0.3), 1)
+})

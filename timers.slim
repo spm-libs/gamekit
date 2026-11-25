@@ -1,0 +1,24 @@
+export trait IntervalTimer {
+    tick: (dt: number) => bool
+    fire: () => void
+    reset: () => void
+}
+
+export func createInterval(seconds: number, ready = false) -> IntervalTimer {
+    let elapsed = 0
+    let due = ready
+    return {
+        tick: (dt: number) => {
+            elapsed += dt
+            if (!due && elapsed < seconds) return false
+            due = false
+            elapsed = 0
+            return true
+        },
+        fire: () => { due = true },
+        reset: () => {
+            due = false
+            elapsed = 0
+        },
+    }
+}

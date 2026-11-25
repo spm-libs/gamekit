@@ -1,0 +1,106 @@
+use { GameHost } from "./host"
+
+export trait Keeper {
+    keep: (key: string, save: () => any, load: (value: any) => void) => void
+    collect: () => Record<string, any>
+    stash: () => void
+    forget: () => void
+}
+
+const TAG = "$kept"
+const NUMBERS = ["Infinity", "-Infinity", "NaN"]
+
+func owns(target: any, key: string) -> bool {
+    return Object.prototype.hasOwnProperty.call(target, key)
+}
+
+func put(target: Record<string, any>, key: string, value: any) -> void {
+    Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true })
+}
+
+func isTagged(value: any) -> bool {
+    if (!value || typeof value != "object" || Array.isArray(value) || !owns(value, TAG)) return false
+    const keys = Object.keys(value)
+    return keys.length == 2 && owns(value, "value")
+}
+
+func encode(value: any) -> any {
+    const escaped = new WeakSet<object>()
+    const text = JSON.stringify(value, (key: string, item: any) => {
+        if (typeof item == "number" && !Number.isFinite(item)) return { [TAG]: "number", value: String(item) }
+        if (item && typeof item == "object" && !Array.isArray(item) && owns(item, TAG) && !escaped.has(item)) {
+            const copy: Record<string, any> = {}
+            for (const name of Object.keys(item)) put(copy, name, item[name])
+            escaped.add(copy)
+            return { [TAG]: "object", value: copy }
+        }
+        return item
+    })
+    return text === undefined ? undefined : JSON.parse(text)
+}
+
+func decodeFields(source: any) -> Record<string, any> {
+    const out: Record<string, any> = {}
+    for (const name of Object.keys(source)) put(out, name, decode(source[name]))
+    return out
+}
+
+func decode(value: any) -> any {
+    if (!value || typeof value != "object") return value
+    if (Array.isArray(value)) return value.map((item: any) => decode(item))
+    if (isTagged(value)) {
+        const kind = value[TAG]
+        const inner = value.value
+        if (kind == "number" && NUMBERS.includes(inner)) return Number(inner)
+        if (kind == "object" && inner && typeof inner == "object" && !Array.isArray(inner)) return decodeFields(inner)
+    }
+    return decodeFields(value)
+}
+
+export func createKeeper(host: GameHost, name = "kept") -> Keeper {
+    const kept = host.persistent(name)
+    const savers = new Map<string, () => any>()
+
+    func collect() -> Record<string, any> {
+        const out: Record<string, any> = {}
+        for (const [key, save] of savers) {
+            try {
+                const value = save()
+                if (value === undefined) continue
+                const encoded = encode(value)
+                if (encoded === undefined) continue
+                put(out, key, encoded)
+            } catch (error) {
+                host.log(`could not keep "${key}": ${error}`)
+            }
+        }
+        return out
+    }
+
+    return {
+        keep: (key: string, save: () => any, load: (value: any) => void) => {
+            savers.set(key, save)
+            if (!owns(kept, key)) return
+            const value = kept[key]
+            delete kept[key]
+            load(decode(value))
+        },
+        collect,
+        stash: () => {
+            const out = collect()
+            for (const key of savers.keys()) {
+                if (owns(out, key)) put(kept, key, out[key])
+                else delete kept[key]
+            }
+        },
+        forget: () => {
+            for (const key of Object.keys(kept)) delete kept[key]
+        },
+    }
+}
+
+export func remember<T>(host: GameHost, name: string, init: () => T) -> T {
+    const store = host.persistent("remembered")
+    if (!owns(store, name)) put(store, name, init())
+    return store[name]
+}

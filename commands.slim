@@ -1,0 +1,35 @@
+use StringHelper from "@std/helpers/string"
+
+export trait CommandRegistry {
+    add: (names: string, usage: string, run: (args: string[]) => void) => void
+    names: () => string[]
+    usages: () => string[]
+    run: (line: string) => bool
+}
+
+trait Command {
+    usage: string
+    run: (args: string[]) => void
+}
+
+export func createCommands() -> CommandRegistry {
+    const commands = new Map<string, Command>()
+    return {
+        add: (names: string, usage: string, run: (args: string[]) => void) => {
+            const command: Command = { usage, run }
+            for (const name of names.split("|")) {
+                const key = name.trim().toLowerCase()
+                if (key.length) commands.set(key, command)
+            }
+        },
+        names: () => Array.from(commands.keys()).sort(),
+        usages: () => Array.from(new Set(commands.values())).map((command) => command.usage),
+        run: (line: string) => {
+            const parts: string[] = StringHelper.splitArgs(line)
+            const command = commands.get((parts[0] || "").toLowerCase())
+            if (!command) return false
+            command.run(parts.slice(1))
+            return true
+        },
+    }
+}

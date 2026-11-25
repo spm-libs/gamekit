@@ -1,0 +1,7 @@
+name = "gamekit"
+description = "Game building blocks for Slim"
+version = "1.0.0"
+
+@ github
+	organization = "true"
+	repo = "spm-libs/gamekit"

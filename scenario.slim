@@ -1,0 +1,76 @@
+export trait Step {
+    run?: () => void
+    seconds?: number
+    until?: () => bool
+    label?: string
+    reload?: bool
+}
+
+export trait StepRun {
+    step: number
+    elapsed: number
+    failures: string[]
+    data: any
+}
+
+export trait ScenarioContext {
+    data: any
+    step: (run: () => void) => void
+    wait: (seconds: number) => void
+    until: (check: () => bool, label: string, seconds?: number) => void
+    reload: () => void
+    ok: (value: any, label: string) => void
+    equal: (a: any, b: any, label: string) => void
+    near: (a: number, b: number, within: number, label: string) => void
+}
+
+export type StepState = "running" | "done" | "timeout"
+
+func same(a: any, b: any) -> bool {
+    return JSON.stringify(a) == JSON.stringify(b)
+}
+
+export func scenarioContext(run: StepRun, steps: Step[], timeout = 10) -> ScenarioContext {
+    const fail = (message: string) => { run.failures.push(message) }
+    return {
+        data: run.data,
+        step: (action: () => void) => { steps.push({ run: action }) },
+        wait: (seconds: number) => { steps.push({ seconds }) },
+        until: (check: () => bool, label: string, seconds?: number) => { steps.push({ until: check, label, seconds: seconds ?? timeout }) },
+        reload: () => { steps.push({ reload: true }) },
+        ok: (value: any, label: string) => { if (!value) fail(`not true: ${label}`) },
+        equal: (a: any, b: any, label: string) => { if (!same(a, b)) fail(`${label}: got ${JSON.stringify(a)}, expected ${JSON.stringify(b)}`) },
+        near: (a: number, b: number, within: number, label: string) => { if (Math.abs(a - b) > within) fail(`${label}: got ${a}, expected ${b} +- ${within}`) },
+    }
+}
+
+export func advanceSteps(steps: Step[], run: StepRun, dt: number, reload: () => void, timeout = 10) -> StepState {
+    if (run.step >= steps.length) return "done"
+    const step = steps[run.step]
+    if (step.reload) {
+        run.step++
+        reload()
+        return "running"
+    }
+    if (step.run) {
+        step.run()
+        run.step++
+        return "running"
+    }
+    run.elapsed += dt
+    if (step.until) {
+        if (step.until()) {
+            run.step++
+            run.elapsed = 0
+        } else if (run.elapsed > (step.seconds ?? timeout)) {
+            run.failures.push(`timed out: ${step.label}`)
+            return "timeout"
+        }
+        return "running"
+    }
+    if (run.elapsed >= (step.seconds ?? 0)) {
+        run.step++
+        run.elapsed = 0
+    }
+    return "running"
+}

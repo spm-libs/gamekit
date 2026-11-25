@@ -1,0 +1,18 @@
+export func distance2(ax: number, az: number, bx: number, bz: number) -> number {
+    return Math.hypot(ax - bx, az - bz)
+}
+
+export func distance3(ax: number, ay: number, az: number, bx: number, by: number, bz: number) -> number {
+    return Math.hypot(ax - bx, ay - by, az - bz)
+}
+
+export func damp(current: number, target: number, tau: number, dt: number) -> number {
+    if (!(tau > 0)) return target
+    return target + (current - target) * Math.exp(-dt / tau)
+}
+
+export func moveTowards(current: number, target: number, step: number) -> number {
+    const gap = target - current
+    if (Math.abs(gap) <= step) return target
+    return current + Math.sign(gap) * step
+}

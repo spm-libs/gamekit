@@ -1,0 +1,60 @@
+export trait TimedEffect {
+    key: string
+    mode: string
+    secs: number
+}
+
+export trait EffectClock {
+    tick: (dt: number, active: TimedEffect[]) => bool
+    seconds: (effect: TimedEffect) => number
+    snapshot: () => Record<string, number>
+    restore: (saved: Record<string, number>) => void
+}
+
+export func createEffectClock() -> EffectClock {
+    let now = 0
+    let fresh = true
+    let shownKeys: string[] = []
+    let shownSeconds: number[] = []
+    const seen = new Map<string, number>()
+
+    func seconds(effect: TimedEffect) -> number {
+        if (effect.mode == "up") return Math.max(0, Math.floor(now - (seen.get(effect.key) ?? now) + 1e-9))
+        return Math.max(0, Math.ceil(effect.secs))
+    }
+
+    func changed(active: TimedEffect[]) -> bool {
+        if (fresh || active.length != shownKeys.length) return true
+        for (let i = 0; i < active.length; i++) {
+            if (active[i].key != shownKeys[i] || seconds(active[i]) != shownSeconds[i]) return true
+        }
+        return false
+    }
+
+    return {
+        tick: (dt: number, active: TimedEffect[]) => {
+            now += dt
+            const present = new Set<string>()
+            for (const effect of active) {
+                present.add(effect.key)
+                if (effect.mode == "up" && !seen.has(effect.key)) seen.set(effect.key, now)
+            }
+            for (const key of Array.from(seen.keys())) if (!present.has(key)) seen.delete(key)
+            if (!changed(active)) return false
+            fresh = false
+            shownKeys = active.map((effect) => effect.key)
+            shownSeconds = active.map((effect) => seconds(effect))
+            return true
+        },
+        seconds,
+        snapshot: () => {
+            const out: Record<string, number> = {}
+            for (const [key, since] of seen) out[key] = now - since
+            return out
+        },
+        restore: (saved: Record<string, number>) => {
+            for (const [key, elapsed] of Object.entries(saved)) if (Number.isFinite(elapsed)) seen.set(key, now - elapsed)
+            fresh = true
+        },
+    }
+}
